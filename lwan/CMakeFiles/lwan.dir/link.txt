@@ -1,0 +1,1 @@
+/usr/bin/cc   -Wall -Wextra -Wshadow    CMakeFiles/lwan.dir/main.c.o  -o lwan -rdynamic -lpthread -lz ../liblwan/liblwan-common.a 

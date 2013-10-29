@@ -1,0 +1,2 @@
+/home/millken/Code/lwan/lwan/CMakeFiles/lwan.dir
+/home/millken/Code/lwan/liblwan/CMakeFiles/lwan-common.dir

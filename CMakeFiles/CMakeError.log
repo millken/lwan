@@ -1,0 +1,53 @@
+Determining if the pthread_create exist failed with the following output:
+Change Dir: /home/millken/Code/lwan/CMakeFiles/CMakeTmp
+
+Run Build Command:/usr/bin/gmake "cmTryCompileExec1287068598/fast"
+/usr/bin/gmake -f CMakeFiles/cmTryCompileExec1287068598.dir/build.make CMakeFiles/cmTryCompileExec1287068598.dir/build
+gmake[1]: Entering directory `/home/millken/Code/lwan/CMakeFiles/CMakeTmp'
+/usr/local/bin/cmake -E cmake_progress_report /home/millken/Code/lwan/CMakeFiles/CMakeTmp/CMakeFiles 1
+Building C object CMakeFiles/cmTryCompileExec1287068598.dir/CheckSymbolExists.c.o
+/usr/bin/cc   -Wall -Wextra -Wshadow     -o CMakeFiles/cmTryCompileExec1287068598.dir/CheckSymbolExists.c.o   -c /home/millken/Code/lwan/CMakeFiles/CMakeTmp/CheckSymbolExists.c
+Linking C executable cmTryCompileExec1287068598
+/usr/local/bin/cmake -E cmake_link_script CMakeFiles/cmTryCompileExec1287068598.dir/link.txt --verbose=1
+/usr/bin/cc    -Wall -Wextra -Wshadow      CMakeFiles/cmTryCompileExec1287068598.dir/CheckSymbolExists.c.o  -o cmTryCompileExec1287068598 -rdynamic 
+CMakeFiles/cmTryCompileExec1287068598.dir/CheckSymbolExists.c.o: In function `main':
+CheckSymbolExists.c:(.text+0xc): undefined reference to `pthread_create'
+collect2: ld returned 1 exit status
+gmake[1]: *** [cmTryCompileExec1287068598] Error 1
+gmake[1]: Leaving directory `/home/millken/Code/lwan/CMakeFiles/CMakeTmp'
+gmake: *** [cmTryCompileExec1287068598/fast] Error 2
+
+File /home/millken/Code/lwan/CMakeFiles/CMakeTmp/CheckSymbolExists.c:
+/* */
+#include <pthread.h>
+
+int main(int argc, char** argv)
+{
+  (void)argv;
+#ifndef pthread_create
+  return ((int*)(&pthread_create))[argc];
+#else
+  (void)argc;
+  return 0;
+#endif
+}
+
+Determining if the function pthread_create exists in the pthreads failed with the following output:
+Change Dir: /home/millken/Code/lwan/CMakeFiles/CMakeTmp
+
+Run Build Command:/usr/bin/gmake "cmTryCompileExec780319898/fast"
+/usr/bin/gmake -f CMakeFiles/cmTryCompileExec780319898.dir/build.make CMakeFiles/cmTryCompileExec780319898.dir/build
+gmake[1]: Entering directory `/home/millken/Code/lwan/CMakeFiles/CMakeTmp'
+/usr/local/bin/cmake -E cmake_progress_report /home/millken/Code/lwan/CMakeFiles/CMakeTmp/CMakeFiles 1
+Building C object CMakeFiles/cmTryCompileExec780319898.dir/CheckFunctionExists.c.o
+/usr/bin/cc   -Wall -Wextra -Wshadow  -DCHECK_FUNCTION_EXISTS=pthread_create   -o CMakeFiles/cmTryCompileExec780319898.dir/CheckFunctionExists.c.o   -c /usr/local/share/cmake-2.8/Modules/CheckFunctionExists.c
+Linking C executable cmTryCompileExec780319898
+/usr/local/bin/cmake -E cmake_link_script CMakeFiles/cmTryCompileExec780319898.dir/link.txt --verbose=1
+/usr/bin/cc    -Wall -Wextra -Wshadow  -DCHECK_FUNCTION_EXISTS=pthread_create    CMakeFiles/cmTryCompileExec780319898.dir/CheckFunctionExists.c.o  -o cmTryCompileExec780319898 -rdynamic -lpthreads 
+/usr/bin/ld: cannot find -lpthreads
+collect2: ld returned 1 exit status
+gmake[1]: *** [cmTryCompileExec780319898] Error 1
+gmake[1]: Leaving directory `/home/millken/Code/lwan/CMakeFiles/CMakeTmp'
+gmake: *** [cmTryCompileExec780319898/fast] Error 2
+
+
