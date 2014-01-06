@@ -86,15 +86,47 @@ lwan_response_shutdown(void)
     lwan_tpl_free(error_template);
 }
 
-bool
+#ifndef NDEBUG
+static const char *
+get_request_method(lwan_request_t *request)
+{
+    if (request->flags & REQUEST_METHOD_GET)
+        return "GET";
+    if (request->flags & REQUEST_METHOD_HEAD)
+        return "HEAD";
+    if (request->flags & REQUEST_METHOD_POST)
+        return "POST";
+    return "UNKNOWN";
+}
+
+static void
+log_request(lwan_request_t *request, lwan_http_status_t status)
+{
+    char ip_buffer[16];
+
+    lwan_status_debug("%s \"%s %s HTTP/%s\" %d %s",
+        lwan_request_get_remote_address(request, ip_buffer),
+        get_request_method(request),
+        request->original_url.value,
+        request->flags & REQUEST_IS_HTTP_1_0 ? "1.0" : "1.1",
+        status,
+        request->response.mime_type);
+}
+#else
+#define log_request(...)
+#endif
+
+void
 lwan_response(lwan_request_t *request, lwan_http_status_t status)
 {
     char headers[DEFAULT_HEADERS_SIZE];
 
     /* Requests without a MIME Type are errors from handlers that
        should just be handled by lwan_default_response(). */
-    if (UNLIKELY(!request->response.mime_type))
-        return lwan_default_response(request, status);
+    if (UNLIKELY(!request->response.mime_type)) {
+        lwan_default_response(request, status);
+        return;
+    }
 
     if (request->response.stream.callback) {
         lwan_http_status_t callback_status;
@@ -104,21 +136,24 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
         /* Reset it after it has been called to avoid eternal recursion on errors */
         request->response.stream.callback = NULL;
 
-        if (callback_status < HTTP_BAD_REQUEST) /* Status < 400: success */
-            return true;
-        return !lwan_default_response(request, callback_status);
+        log_request(request, status);
+
+        if (callback_status >= HTTP_BAD_REQUEST) /* Status < 400: success */
+            lwan_default_response(request, callback_status);
+        return;
     }
 
     size_t header_len = lwan_prepare_response_header(request, status, headers, sizeof(headers));
-    if (UNLIKELY(!header_len))
-        return lwan_default_response(request, HTTP_INTERNAL_ERROR);
+    if (UNLIKELY(!header_len)) {
+        lwan_default_response(request, HTTP_INTERNAL_ERROR);
+        return;
+    }
+
+    log_request(request, status);
 
     if (request->flags & REQUEST_METHOD_HEAD) {
-        if (UNLIKELY(lwan_write(request, headers, header_len) < 0)) {
-            lwan_status_perror("write");
-            return false;
-        }
-        return true;
+        lwan_write(request, headers, header_len);
+        return;
     }
 
     struct iovec response_vec[] = {
@@ -126,15 +161,10 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
         { .iov_base = strbuf_get_buffer(request->response.buffer), .iov_len = strbuf_get_length(request->response.buffer) }
     };
 
-    if (UNLIKELY(lwan_writev(request, response_vec, N_ELEMENTS(response_vec)) < 0)) {
-        lwan_status_perror("writev");
-        return false;
-    }
-
-    return true;
+    lwan_writev(request, response_vec, N_ELEMENTS(response_vec));
 }
 
-bool
+void
 lwan_default_response(lwan_request_t *request, lwan_http_status_t status)
 {
     request->response.mime_type = "text/html";
@@ -145,7 +175,7 @@ lwan_default_response(lwan_request_t *request, lwan_http_status_t status)
             .long_message = lwan_http_status_as_descriptive_string(status)
         }});
 
-    return lwan_response(request, status);
+    lwan_response(request, status);
 }
 
 #define RETURN_0_ON_OVERFLOW(len_) \
@@ -216,7 +246,7 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
         APPEND_UINT(strbuf_get_length(request->response.buffer));
     APPEND_CONSTANT("\r\nContent-Type: ");
     APPEND_STRING(request->response.mime_type);
-    if (request->flags & REQUEST_IS_KEEP_ALIVE)
+    if (request->conn->flags & CONN_KEEP_ALIVE)
         APPEND_CONSTANT("\r\nConnection: keep-alive");
     else
         APPEND_CONSTANT("\r\nConnection: close");

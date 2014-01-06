@@ -30,7 +30,6 @@
 #include "lwan.h"
 #include "lwan-cache.h"
 #include "lwan-io-wrappers.h"
-#include "lwan-sendfile.h"
 #include "lwan-serve-files.h"
 #include "lwan-template.h"
 #include "realpathat.h"
@@ -419,7 +418,7 @@ _get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
             /* Redirect /path to /path/. This is to help cases where there's
              * something like <img src="../foo.png">, so that actually
              * /path/../foo.png is served instead of /path../foo.png.  */
-            const char *key_end = strchr(key, '\0');
+            const char *key_end = rawmemchr(key, '\0');
             if (*(key_end - 1) != '/')
                 return &redir_funcs;
 
@@ -451,6 +450,27 @@ _get_funcs(serve_files_priv_t *priv, const char *key, char *full_path,
     return &sendfile_funcs;
 }
 
+static file_cache_entry_t *
+_create_cache_entry_from_funcs(serve_files_priv_t *priv, const char *full_path,
+    struct stat *st, const cache_funcs_t *funcs)
+{
+    file_cache_entry_t *fce;
+
+    fce = malloc(sizeof(*fce) + funcs->struct_size);
+    if (UNLIKELY(!fce))
+        return NULL;
+
+    if (LIKELY(funcs->init(fce, priv, full_path, st)))
+        return fce;
+
+    free(fce);
+
+    if (funcs != &mmap_funcs)
+        return NULL;
+
+    return _create_cache_entry_from_funcs(priv, full_path, st, &sendfile_funcs);
+}
+
 static struct cache_entry_t *
 _create_cache_entry(const char *key, void *context)
 {
@@ -462,21 +482,18 @@ _create_cache_entry(const char *key, void *context)
 
     if (UNLIKELY(!realpathat2(priv->root.fd, priv->root.path,
                 key, full_path, &st)))
-        goto error;
+        return NULL;
 
     if (UNLIKELY(strncmp(full_path, priv->root.path, priv->root.path_len)))
-        goto error;
+        return NULL;
 
     funcs = _get_funcs(priv, key, full_path, &st);
     if (UNLIKELY(!funcs))
-        goto error;
+        return NULL;
 
-    fce = malloc(sizeof(*fce) + funcs->struct_size);
+    fce = _create_cache_entry_from_funcs(priv, full_path, &st, funcs);
     if (UNLIKELY(!fce))
-        goto error;
-
-    if (UNLIKELY(!funcs->init(fce, priv, full_path, &st)))
-        goto error_init;
+        return NULL;
 
     lwan_format_rfc_time(st.st_mtime, fce->last_modified.string);
 
@@ -484,11 +501,6 @@ _create_cache_entry(const char *key, void *context)
     fce->funcs = funcs;
 
     return (struct cache_entry_t *)fce;
-
-error_init:
-    free(fce);
-error:
-    return NULL;
 }
 
 static void
@@ -660,8 +672,8 @@ _prepare_headers(lwan_request_t *request,
     request->response.content_length = size;
 
     SET_NTH_HEADER(0, "Last-Modified", fce->last_modified.string);
-    SET_NTH_HEADER(1, "Date", request->thread->date.date);
-    SET_NTH_HEADER(2, "Expires", request->thread->date.expires);
+    SET_NTH_HEADER(1, "Date", request->conn->thread->date.date);
+    SET_NTH_HEADER(2, "Expires", request->conn->thread->date.expires);
 
     if (deflated) {
         SET_NTH_HEADER(3, "Content-Encoding", "deflate");
@@ -729,7 +741,7 @@ _sendfile_serve(lwan_request_t *request, void *data)
 {
     file_cache_entry_t *fce = data;
     sendfile_cache_data_t *sd = (sendfile_cache_data_t *)(fce + 1);
-    char *headers = request->buffer.value;
+    char headers[DEFAULT_BUFFER_SIZE];
     size_t header_len;
     lwan_http_status_t return_status;
     off_t from, to;
@@ -748,8 +760,7 @@ _sendfile_serve(lwan_request_t *request, void *data)
         return HTTP_INTERNAL_ERROR;
 
     if (request->flags & REQUEST_METHOD_HEAD || return_status == HTTP_NOT_MODIFIED) {
-        if (UNLIKELY(lwan_write(request, headers, header_len) < 0))
-            return HTTP_INTERNAL_ERROR;
+        lwan_write(request, headers, header_len);
     } else {
         serve_files_priv_t *priv = request->response.stream.priv;
         /*
@@ -772,11 +783,8 @@ _sendfile_serve(lwan_request_t *request, void *data)
             }
         }
 
-        if (UNLIKELY(lwan_send(request, headers, header_len, MSG_MORE) < 0))
-            return HTTP_INTERNAL_ERROR;
-
-        if (UNLIKELY(lwan_sendfile(request, file_fd, from, to) < 0))
-            return HTTP_INTERNAL_ERROR;
+        lwan_send(request, headers, header_len, MSG_MORE);
+        lwan_sendfile(request, file_fd, from, to);
     }
 
     return return_status;
@@ -800,16 +808,14 @@ _serve_contents_and_size(lwan_request_t *request, file_cache_entry_t *fce,
         return HTTP_INTERNAL_ERROR;
 
     if (request->flags & REQUEST_METHOD_HEAD || return_status == HTTP_NOT_MODIFIED) {
-        if (UNLIKELY(lwan_write(request, headers, header_len) < 0))
-            return_status = HTTP_INTERNAL_ERROR;
+        lwan_write(request, headers, header_len);
     } else {
         struct iovec response_vec[] = {
             { .iov_base = headers, .iov_len = header_len },
             { .iov_base = contents, .iov_len = size }
         };
 
-        if (UNLIKELY(lwan_writev(request, response_vec, N_ELEMENTS(response_vec)) < 0))
-            return_status = HTTP_INTERNAL_ERROR;
+        lwan_writev(request, response_vec, N_ELEMENTS(response_vec));
     }
 
     return return_status;
@@ -844,7 +850,7 @@ _redir_serve(lwan_request_t *request, void *data)
 {
     file_cache_entry_t *fce = data;
     redir_cache_data_t *rd = (redir_cache_data_t *)(fce + 1);
-    char *header_buf = request->buffer.value;
+    char header_buf[DEFAULT_BUFFER_SIZE];
     size_t header_buf_size;
     lwan_key_value_t headers[2];
 
@@ -864,8 +870,7 @@ _redir_serve(lwan_request_t *request, void *data)
         { .iov_base = rd->redir_to, .iov_len = request->response.content_length },
     };
 
-    if (UNLIKELY(lwan_writev(request, response_vec, N_ELEMENTS(response_vec)) < 0))
-        return HTTP_INTERNAL_ERROR;
+    lwan_writev(request, response_vec, N_ELEMENTS(response_vec));
 
     return HTTP_MOVED_PERMANENTLY;
 }
@@ -887,7 +892,7 @@ serve_files_handle_cb(lwan_request_t *request, lwan_response_t *response, void *
         --request->url.len;
     }
 
-    ce = cache_coro_get_and_ref_entry(priv->cache, request->coro,
+    ce = cache_coro_get_and_ref_entry(priv->cache, request->conn->coro,
                 request->url.value);
     if (LIKELY(ce)) {
         file_cache_entry_t *fce = (file_cache_entry_t *)ce;

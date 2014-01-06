@@ -251,12 +251,6 @@ class TestMalformedRequests(LwanTest):
     self.assertHttpCode(sock, 400)
 
 
-  def test_post_request(self):
-    r = requests.post('http://127.0.0.1:8080/hello')
-
-    self.assertEqual(r.status_code, 405)
-
-
   def test_request_too_large(self):
     r = requests.get('http://127.0.0.1:8080/' + 'X' * 10000)
 
@@ -333,6 +327,20 @@ class TestHelloWorld(LwanTest):
     self.assertEqual(r.text, 'Hello, testsuite!')
 
 
+  def test_post_request(self):
+    data = {
+      'answer': 'fourty-two',
+      'foo': 'bar'
+    }
+    r = requests.post('http://127.0.0.1:8080/hello?dump_vars=1', data=data)
+
+    self.assertEqual(r.status_code, 200)
+
+    self.assertTrue('POST data' in r.text)
+    for k, v in data.items():
+      self.assertTrue('Key = "%s"; Value = "%s"\n' % (k, v) in r.text)
+
+
 class TestCache(LwanTest):
   def mmaps(self, f):
     f = f + '\n'
@@ -348,26 +356,32 @@ class TestCache(LwanTest):
     return any(self.mmaps(f))
 
 
+  def wait_munmap(self, f, timeout=20.0):
+    while self.is_mmapped(f) and timeout >= 0:
+      time.sleep(0.1)
+      timeout -= 0.1
+
+
   def test_cache_munmaps_conn_close(self):
     r = requests.get('http://127.0.0.1:8080/100.html')
 
-    self.assertTrue(self.is_mmapped('wwwroot/100.html'))
-    time.sleep(20)
-    self.assertFalse(self.is_mmapped('wwwroot/100.html'))
+    self.assertTrue(self.is_mmapped('/100.html'))
+    self.wait_munmap('/100.html')
+    self.assertFalse(self.is_mmapped('/100.html'))
 
 
   def test_cache_munmaps_conn_keep_alive(self):
     s = requests.Session()
     r = s.get('http://127.0.0.1:8080/100.html')
 
-    self.assertTrue(self.is_mmapped('wwwroot/100.html'))
-    time.sleep(20)
-    self.assertFalse(self.is_mmapped('wwwroot/100.html'))
+    self.assertTrue(self.is_mmapped('/100.html'))
+    self.wait_munmap('/100.html')
+    self.assertFalse(self.is_mmapped('/100.html'))
 
 
   def test_cache_does_not_mmap_large_files(self):
     r = requests.get('http://127.0.0.1:8080/zero')
-    self.assertFalse(self.is_mmapped('wwwroot/zero'))
+    self.assertFalse(self.is_mmapped('/zero'))
 
 
   def test_cache_mmaps_once_conn_keep_alive(self):
@@ -375,24 +389,24 @@ class TestCache(LwanTest):
 
     for request in range(5):
       r = s.get('http://127.0.0.1:8080/100.html')
-      self.assertEqual(self.count_mmaps('wwwroot/100.html'), 1)
+      self.assertEqual(self.count_mmaps('/100.html'), 1)
 
 
   def test_cache_mmaps_once_conn_close(self):
     for request in range(5):
       requests.get('http://127.0.0.1:8080/100.html')
-      self.assertEqual(self.count_mmaps('wwwroot/100.html'), 1)
+      self.assertEqual(self.count_mmaps('/100.html'), 1)
 
 
   def test_cache_mmaps_once_even_after_timeout(self):
     for request in range(5):
       requests.get('http://127.0.0.1:8080/100.html')
-      self.assertEqual(self.count_mmaps('wwwroot/100.html'), 1)
+      self.assertEqual(self.count_mmaps('/100.html'), 1)
 
     time.sleep(10)
 
     requests.get('http://127.0.0.1:8080/100.html')
-    self.assertEqual(self.count_mmaps('wwwroot/100.html'), 1)
+    self.assertEqual(self.count_mmaps('/100.html'), 1)
 
 if __name__ == '__main__':
   unittest.main()

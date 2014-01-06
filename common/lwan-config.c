@@ -50,20 +50,23 @@ int parse_int(const char *value, int default_value)
 
   if (*value == '0') {
     value++;
-    if (*value == 'x')
+    if (*value == 'x') {
       base = 16;
-    else if (*value == 'b')
+    } else if (*value == 'b') {
       base = 2;
-    else if (isdigit(*value))
+    } else if (isdigit(*value)) {
       base = 8;
-    else
+      goto convert;
+    } else {
       return default_value;
+    }
 
     value++;
   } else {
     base = 10;
   }
 
+convert:
   parsed = strtol(value, &endptr, base);
 
   if (parsed == LONG_MIN || parsed == LONG_MAX)
@@ -154,17 +157,13 @@ static bool parse_section(char *line, config_line_t *l)
 
 static bool parse_line(char *line, config_line_t *l)
 {
-  char *key, *value;
   char *equal = strchr(line, '=');
   if (!equal)
     return false;
 
   *equal = '\0';
-  key = remove_trailing_spaces(remove_leading_spaces(line));
-  value = remove_leading_spaces(equal + 1);
-
-  l->line.key = key;
-  l->line.value = value;
+  l->line.key = remove_trailing_spaces(remove_leading_spaces(line));
+  l->line.value = remove_leading_spaces(equal + 1);
   l->type = CONFIG_LINE_TYPE_LINE;
 
   return true;

@@ -34,6 +34,13 @@
 #define DEFAULT_BUFFER_SIZE 4096
 #define DEFAULT_HEADERS_SIZE 512
 
+#define ASSERT_NOT_REACHED()  assert(!"Not reached")
+#define ASSERT_NOT_REACHED_RETURN(...) \
+    do { \
+        ASSERT_NOT_REACHED(); \
+        return (__VA_ARGS__); \
+    } while(0)
+
 #define N_ELEMENTS(array) (sizeof(array) / sizeof(array[0]))
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -79,6 +86,7 @@ typedef struct lwan_thread_t_		lwan_thread_t;
 typedef struct lwan_url_map_t_		lwan_url_map_t;
 typedef struct lwan_value_t_		lwan_value_t;
 typedef struct lwan_config_t_		lwan_config_t;
+typedef struct lwan_connection_t_	lwan_connection_t;
 
 typedef enum {
     HTTP_OK = 200,
@@ -100,20 +108,31 @@ typedef enum {
     HANDLER_PARSE_IF_MODIFIED_SINCE = 1<<1,
     HANDLER_PARSE_RANGE = 1<<2,
     HANDLER_PARSE_ACCEPT_ENCODING = 1<<3,
+    HANDLER_PARSE_POST_DATA = 1<<4,
 
-    HANDLER_PARSE_MASK = 1<<0 | 1<<1 | 1<<2 | 1<<3
+    HANDLER_PARSE_MASK = 1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4
 } lwan_handler_flags_t;
 
 typedef enum {
-    REQUEST_IS_KEEP_ALIVE      = 1<<0,
-    REQUEST_IS_ALIVE           = 1<<1,
-    REQUEST_SHOULD_RESUME_CORO = 1<<2,
-    REQUEST_WRITE_EVENTS       = 1<<3,
-    REQUEST_ACCEPT_DEFLATE     = 1<<4,
-    REQUEST_IS_HTTP_1_0	       = 1<<5,
-    REQUEST_METHOD_GET         = 1<<6,
-    REQUEST_METHOD_HEAD        = 1<<7
+    REQUEST_ACCEPT_DEFLATE  = 1<<0,
+    REQUEST_IS_HTTP_1_0	    = 1<<1,
+    REQUEST_METHOD_GET      = 1<<2,
+    REQUEST_METHOD_HEAD     = 1<<3,
+    REQUEST_METHOD_POST     = 1<<4,
 } lwan_request_flags_t;
+
+typedef enum {
+    CONN_KEEP_ALIVE         = 1<<0,
+    CONN_IS_ALIVE           = 1<<1,
+    CONN_SHOULD_RESUME_CORO = 1<<2,
+    CONN_WRITE_EVENTS       = 1<<3
+} lwan_connection_flags_t;
+
+typedef enum {
+    CONN_CORO_ABORT = -1,
+    CONN_CORO_MAY_RESUME = 0,
+    CONN_CORO_FINISHED = 1
+} lwan_connection_coro_yield_t;
 
 struct lwan_key_value_t_ {
     char *key;
@@ -138,20 +157,27 @@ struct lwan_value_t_ {
     size_t len;
 };
 
-struct lwan_request_t_ {
-    lwan_request_flags_t flags;
-    int fd;
+struct lwan_connection_t_ {
+    /* This structure is exactly 32-bytes on x86-64. If it is changed,
+     * make sure the scheduler (lwan.c) is updated as well. */
+    lwan_connection_flags_t flags;
+    unsigned int time_to_die;
     coro_t *coro;
     lwan_thread_t *thread;
-    lwan_value_t buffer;
+    strbuf_t *response_buffer; /* Leaky abstraction */
+};
+
+struct lwan_request_t_ {
+    lwan_request_flags_t flags;
     lwan_value_t url;
-    unsigned int time_to_die;
-    in_addr_t remote_address;
+    lwan_value_t original_url;
+    lwan_connection_t *conn;
+    int fd;
 
     struct {
-      lwan_key_value_t *base;
-      size_t len;
-    } query_params;
+        lwan_key_value_t *base;
+        size_t len;
+    } query_params, post_data;
     struct {
         time_t if_modified_since;
         struct {
@@ -204,7 +230,7 @@ struct lwan_config_t_ {
 
 struct lwan_t_ {
     lwan_trie_t *url_map_trie;
-    lwan_request_t *requests;
+    lwan_connection_t *conns;
     int main_socket;
 
     lwan_config_t config;
@@ -218,12 +244,15 @@ struct lwan_t_ {
 
 void lwan_set_url_map(lwan_t *l, const lwan_url_map_t *map);
 void lwan_main_loop(lwan_t *l);
-bool lwan_response(lwan_request_t *request, lwan_http_status_t status);
+
+void lwan_response(lwan_request_t *request, lwan_http_status_t status);
+void lwan_default_response(lwan_request_t *request, lwan_http_status_t status);
 size_t lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status, char header_buffer[], size_t header_buffer_size);
-bool lwan_default_response(lwan_request_t *request, lwan_http_status_t status);
+
+const char *lwan_request_get_post_param(lwan_request_t *request, const char *key);
 const char *lwan_request_get_query_param(lwan_request_t *request, const char *key);
 const char *lwan_request_get_remote_address(lwan_request_t *request, char *buffer);
-bool lwan_process_request(lwan_request_t *request);
+void lwan_process_request(lwan_t *l, lwan_request_t *request);
 
 void lwan_format_rfc_time(time_t t, char buffer[static 31]);
 
@@ -233,5 +262,7 @@ const char *lwan_determine_mime_type_for_file_name(const char *file_name) __attr
 
 void lwan_init(lwan_t *l);
 void lwan_shutdown(lwan_t *l);
+
+int lwan_connection_get_fd(lwan_connection_t *conn);
 
 #endif /* __LWAN_H__ */
