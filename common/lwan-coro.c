@@ -17,8 +17,11 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#define _GNU_SOURCE
 #include <assert.h>
 #include <limits.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,14 +48,14 @@ struct coro_t_ {
     coro_context_t context;
     int yield_value;
 
+#if !defined(NDEBUG) && defined(USE_VALGRIND)
+    int vg_stack_id;
+#endif
+
     coro_defer_t *defer;
     void *data;
 
     bool ended;
-
-#if !defined(NDEBUG) && defined(USE_VALGRIND)
-    int vg_stack_id;
-#endif
 };
 
 static void _coro_entry_point(coro_t *data, coro_function_t func);
@@ -103,19 +106,6 @@ void _coro_swapcontext(coro_context_t *current, coro_context_t *other)
 #define _coro_swapcontext(cur,oth) swapcontext(cur, oth)
 #endif
 
-#ifdef __x86_64__
-static ALWAYS_INLINE void
-_coro_makecontext(coro_t *coro, void *stack, size_t stack_size, coro_function_t func)
-{
-    coro->context[6 /* RDI */] = (uintptr_t) coro;
-    coro->context[7 /* RSI */] = (uintptr_t) func;
-    coro->context[8 /* RIP */] = (uintptr_t) _coro_entry_point;
-    coro->context[9 /* RSP */] = (uintptr_t) stack + stack_size;
-}
-#else
-#define _coro_makecontext(ctx, fun, args, ...) makecontext(ctx, fun, args, __VA_ARGS__)
-#endif
-
 static void
 _coro_entry_point(coro_t *coro, coro_function_t func)
 {
@@ -140,18 +130,18 @@ _coro_run_deferred(coro_t *coro)
 void
 coro_reset(coro_t *coro, coro_function_t func, void *data)
 {
-    void *stack = (coro_t *)coro + 1;
+    unsigned char *stack = (unsigned char *)(coro + 1);
 
-#if !defined(NDEBUG) && defined(USE_VALGRIND)
-    coro->vg_stack_id = VALGRIND_STACK_REGISTER(stack, (char *)stack + CORO_STACK_MIN);
-#endif
     coro->ended = false;
     coro->data = data;
 
     _coro_run_deferred(coro);
 
 #ifdef __x86_64__
-    _coro_makecontext(coro, stack, CORO_STACK_MIN, func);
+    coro->context[6 /* RDI */] = (uintptr_t) coro;
+    coro->context[7 /* RSI */] = (uintptr_t) func;
+    coro->context[8 /* RIP */] = (uintptr_t) _coro_entry_point;
+    coro->context[9 /* RSP */] = (uintptr_t) stack + CORO_STACK_MIN;
 #else
     getcontext(&coro->context);
 
@@ -160,8 +150,7 @@ coro_reset(coro_t *coro, coro_function_t func, void *data)
     coro->context.uc_stack.ss_flags = 0;
     coro->context.uc_link = NULL;
 
-    _coro_makecontext(&coro->context, (void (*)())_coro_entry_point,
-                2, coro, func);
+    makecontext(&coro->context, (void (*)())_coro_entry_point, 2, coro, func);
 #endif
 }
 
@@ -175,6 +164,11 @@ coro_new(coro_switcher_t *switcher, coro_function_t function, void *data)
     coro->switcher = switcher;
     coro->defer = NULL;
     coro_reset(coro, function, data);
+
+#if !defined(NDEBUG) && defined(USE_VALGRIND)
+    char *stack = (char *)(coro + 1);
+    coro->vg_stack_id = VALGRIND_STACK_REGISTER(stack, stack + CORO_STACK_MIN);
+#endif
 
     return coro;
 }
@@ -276,4 +270,22 @@ coro_malloc(coro_t *coro, size_t size)
     coro->defer = defer;
 
     return defer + 1;
+}
+
+char *
+coro_printf(coro_t *coro, const char *fmt, ...)
+{
+    va_list values;
+    int len;
+    char *tmp_str;
+
+    va_start(values, fmt);
+    len = vasprintf(&tmp_str, fmt, values);
+    va_end(values);
+
+    if (UNLIKELY(len < 0))
+        return NULL;
+
+    coro_defer(coro, CORO_DEFER(free), tmp_str);
+    return tmp_str;
 }

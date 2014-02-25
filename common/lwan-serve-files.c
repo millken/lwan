@@ -637,13 +637,6 @@ serve_files_shutdown(void *data)
         return;
     }
 
-#ifndef NDEBUG
-    unsigned hits, misses, evictions;
-    cache_get_stats(priv->cache, &hits, &misses, &evictions);
-    lwan_status_debug("Cache stats: %d hits, %d misses, %d evictions",
-            hits, misses, evictions);
-#endif
-
     lwan_tpl_free(priv->directory_list_tpl);
     cache_destroy(priv->cache);
     close(priv->root.fd);
@@ -666,20 +659,18 @@ _prepare_headers(lwan_request_t *request,
                  char *header_buf,
                  size_t header_buf_size)
 {
-    lwan_key_value_t headers[5];
+    lwan_key_value_t headers[3];
 
     request->response.headers = headers;
     request->response.content_length = size;
 
     SET_NTH_HEADER(0, "Last-Modified", fce->last_modified.string);
-    SET_NTH_HEADER(1, "Date", request->conn->thread->date.date);
-    SET_NTH_HEADER(2, "Expires", request->conn->thread->date.expires);
 
     if (deflated) {
-        SET_NTH_HEADER(3, "Content-Encoding", "deflate");
-        SET_NTH_HEADER(4, NULL, NULL);
+        SET_NTH_HEADER(1, "Content-Encoding", "deflate");
+        SET_NTH_HEADER(2, NULL, NULL);
     } else {
-        SET_NTH_HEADER(3, NULL, NULL);
+        SET_NTH_HEADER(1, NULL, NULL);
     }
 
     return lwan_prepare_response_header(request, return_status,

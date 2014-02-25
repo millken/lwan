@@ -1,6 +1,6 @@
 /*
  * lwan - simple web server
- * Copyright (c) 2012 Leandro A. F. Pereira <leandro@hardinfo.org>
+ * Copyright (c) 2012-2014 Leandro A. F. Pereira <leandro@hardinfo.org>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -27,6 +27,7 @@
 
 #include "lwan.h"
 #include "lwan-config.h"
+#include "lwan-http-authorize.h"
 
 enum {
     HTTP_STR_GET  = MULTICHAR_CONSTANT('G','E','T',' '),
@@ -49,7 +50,8 @@ enum {
     HTTP_HDR_CONTENT           = MULTICHAR_CONSTANT_L('C','o','n','t'),
     HTTP_HDR_ENCODING          = MULTICHAR_CONSTANT_L('-','E','n','c'),
     HTTP_HDR_LENGTH            = MULTICHAR_CONSTANT_L('-','L','e','n'),
-    HTTP_HDR_TYPE              = MULTICHAR_CONSTANT_L('-','T','y','p')
+    HTTP_HDR_TYPE              = MULTICHAR_CONSTANT_L('-','T','y','p'),
+    HTTP_HDR_AUTHORIZATION     = MULTICHAR_CONSTANT_L('A','u','t','h'),
 } lwan_http_header_str_t;
 
 typedef struct lwan_request_parse_t_	lwan_request_parse_t;
@@ -64,6 +66,7 @@ struct lwan_request_parse_t_ {
     lwan_value_t content_length;
     lwan_value_t post_data;
     lwan_value_t content_type;
+    lwan_value_t authorization;
     char connection;
 };
 
@@ -136,13 +139,13 @@ _key_value_compare_qsort_key(const void *a, const void *b)
 #define DECODE_AND_ADD() \
     do { \
         if (LIKELY(_url_decode(key))) { \
-            qs[values].key = key; \
+            kvs[values].key = key; \
             if (LIKELY(_url_decode(value))) \
-                qs[values].value = value; \
+                kvs[values].value = value; \
             else \
-                qs[values].value = ""; \
+                kvs[values].value = ""; \
             ++values; \
-            if (UNLIKELY(values >= N_ELEMENTS(qs))) \
+            if (UNLIKELY(values >= N_ELEMENTS(kvs))) \
                 goto oom; \
         } \
     } while(0)
@@ -158,7 +161,7 @@ _parse_urlencoded_keyvalues(lwan_request_t *request,
     char *value = NULL;
     char *ch;
     size_t values = 0;
-    lwan_key_value_t qs[256];
+    lwan_key_value_t kvs[256];
 
     for (ch = key; *ch; ch++) {
         switch (*ch) {
@@ -177,13 +180,13 @@ _parse_urlencoded_keyvalues(lwan_request_t *request,
 
     DECODE_AND_ADD();
 oom:
-    qs[values].key = qs[values].value = NULL;
+    kvs[values].key = kvs[values].value = NULL;
 
     lwan_key_value_t *kv = coro_malloc(request->conn->coro,
                                     (1 + values) * sizeof(lwan_key_value_t));
     if (LIKELY(kv)) {
-        qsort(qs, values, sizeof(lwan_key_value_t), _key_value_compare_qsort_key);
-        *base = memcpy(kv, qs, (1 + values) * sizeof(lwan_key_value_t));
+        qsort(kvs, values, sizeof(lwan_key_value_t), _key_value_compare_qsort_key);
+        *base = memcpy(kv, kvs, (1 + values) * sizeof(lwan_key_value_t));
         *len = values;
     }
 }
@@ -204,7 +207,7 @@ _parse_post_data(lwan_request_t *request, lwan_request_parse_t *helper)
 
     if (helper->content_type.len != sizeof(content_type) - 1)
         return;
-    if (strcmp(helper->content_type.value, content_type))
+    if (UNLIKELY(strcmp(helper->content_type.value, content_type)))
         return;
 
     _parse_urlencoded_keyvalues(request, &helper->post_data,
@@ -216,7 +219,7 @@ _identify_http_path(lwan_request_t *request, char *buffer,
             lwan_request_parse_t *helper)
 {
     char *end_of_line = memchr(buffer, '\r', helper->buffer.len - (buffer - helper->buffer.value));
-    if (!end_of_line)
+    if (UNLIKELY(!end_of_line))
         return NULL;
     *end_of_line = '\0';
 
@@ -313,6 +316,10 @@ retry:
             helper->range.value = value;
             helper->range.len = length;
             break;
+        CASE_HEADER(HTTP_HDR_AUTHORIZATION, "Authorization")
+            helper->authorization.value = value;
+            helper->authorization.len = length;
+            break;
         CASE_HEADER(HTTP_HDR_ENCODING, "-Encoding")
             helper->accept_encoding.value = value;
             helper->accept_encoding.len = length;
@@ -366,7 +373,7 @@ _parse_if_modified_since(lwan_request_t *request, lwan_request_parse_t *helper)
 static ALWAYS_INLINE void
 _parse_range(lwan_request_t *request, lwan_request_parse_t *helper)
 {
-    if (helper->range.len <= (sizeof("bytes=") - 1))
+    if (UNLIKELY(helper->range.len <= (sizeof("bytes=") - 1)))
         return;
 
     char *range = helper->range.value;
@@ -484,7 +491,8 @@ yield_and_read_again:
                 continue;
             }
 
-            if (!total_read) /* Unexpected error before reading anything */
+            /* Unexpected error before reading anything */
+            if (UNLIKELY(!total_read))
                 return HTTP_BAD_REQUEST;
 
             /* Unexpected error, kill coro */
@@ -555,8 +563,10 @@ _read_post_data(lwan_request_t *request, lwan_request_parse_t *helper, char
     ssize_t post_data_size;
 
     post_data_size = parse_int(helper->content_length.value, DEFAULT_BUFFER_SIZE);
-    if (post_data_size > DEFAULT_BUFFER_SIZE)
+    if (UNLIKELY(post_data_size > DEFAULT_BUFFER_SIZE))
         return HTTP_TOO_LARGE;
+    if (UNLIKELY(post_data_size < 0))
+        return HTTP_BAD_REQUEST;
 
     ssize_t curr_post_data_len = helper->buffer.len - (buffer - helper->buffer.value);
     if (curr_post_data_len == post_data_size) {
@@ -614,8 +624,43 @@ _parse_http_request(lwan_request_t *request, lwan_request_parse_t *helper)
 
     if (request->flags & REQUEST_METHOD_POST) {
         lwan_http_status_t status = _read_post_data(request, helper, buffer);
-        if (status != HTTP_OK)
+        if (UNLIKELY(status != HTTP_OK))
             return status;
+    }
+
+    return HTTP_OK;
+}
+
+static ALWAYS_INLINE lwan_http_status_t
+_prepare_for_response(lwan_url_map_t *url_map,
+                      lwan_request_t *request,
+                      lwan_request_parse_t *helper)
+{
+    if (url_map->flags & HANDLER_PARSE_QUERY_STRING)
+        _parse_query_string(request, helper);
+
+    if (url_map->flags & HANDLER_PARSE_IF_MODIFIED_SINCE)
+        _parse_if_modified_since(request, helper);
+
+    if (url_map->flags & HANDLER_PARSE_RANGE)
+        _parse_range(request, helper);
+
+    if (url_map->flags & HANDLER_PARSE_ACCEPT_ENCODING)
+        _parse_accept_encoding(request, helper);
+
+    if (request->flags & REQUEST_METHOD_POST) {
+        if (url_map->flags & HANDLER_PARSE_POST_DATA)
+            _parse_post_data(request, helper);
+        else
+            return HTTP_NOT_ALLOWED;
+    }
+
+    if (url_map->flags & HANDLER_MUST_AUTHORIZE) {
+        if (!lwan_http_authorize(request,
+                        &helper->authorization,
+                        url_map->authorization.realm,
+                        url_map->authorization.password_file))
+            return HTTP_NOT_AUTHORIZED;
     }
 
     return HTTP_OK;
@@ -658,21 +703,10 @@ lwan_process_request(lwan_t *l, lwan_request_t *request)
     request->url.value += url_map->prefix_len;
     request->url.len -= url_map->prefix_len;
 
-    if (url_map->flags & HANDLER_PARSE_QUERY_STRING)
-        _parse_query_string(request, &helper);
-    if (url_map->flags & HANDLER_PARSE_IF_MODIFIED_SINCE)
-        _parse_if_modified_since(request, &helper);
-    if (url_map->flags & HANDLER_PARSE_RANGE)
-        _parse_range(request, &helper);
-    if (url_map->flags & HANDLER_PARSE_ACCEPT_ENCODING)
-        _parse_accept_encoding(request, &helper);
-    if (request->flags & REQUEST_METHOD_POST) {
-        if (url_map->flags & HANDLER_PARSE_POST_DATA) {
-            _parse_post_data(request, &helper);
-        } else {
-            lwan_default_response(request, HTTP_NOT_ALLOWED);
-            return;
-        }
+    status = _prepare_for_response(url_map, request, &helper);
+    if (UNLIKELY(status != HTTP_OK)) {
+        lwan_default_response(request, status);
+        return;
     }
 
     status = url_map->callback(request, &request->response, url_map->data);
@@ -731,7 +765,7 @@ lwan_request_get_remote_address(lwan_request_t *request,
 {
     struct sockaddr_in sock_addr;
     socklen_t sock_len = sizeof(struct sockaddr_in);
-    if (getpeername(request->fd, &sock_addr, &sock_len) < 0)
+    if (UNLIKELY(getpeername(request->fd, &sock_addr, &sock_len) < 0))
         return NULL;
 
     /* The definition of inet_ntoa() in the standard is not thread-safe. The

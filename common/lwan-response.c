@@ -74,7 +74,7 @@ lwan_response_init(void)
     lwan_status_debug("Initializing default response");
 
     error_template = lwan_tpl_compile_string(error_template_str, error_descriptor);
-    if (!error_template)
+    if (UNLIKELY(!error_template))
         lwan_status_critical_perror("lwan_tpl_compile_string");
 }
 
@@ -121,6 +121,21 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
 {
     char headers[DEFAULT_HEADERS_SIZE];
 
+    log_request(request, status);
+
+    if (request->flags & RESPONSE_CHUNKED_ENCODING) {
+        /* Send last, 0-sized chunk */
+        if (UNLIKELY(!strbuf_reset_length(request->response.buffer)))
+            coro_yield(request->conn->coro, CONN_CORO_ABORT);
+        lwan_response_send_chunk(request);
+        return;
+    }
+
+    if (UNLIKELY(request->flags & RESPONSE_SENT_HEADERS)) {
+        lwan_status_debug("Headers already sent, ignoring call");
+        return;
+    }
+
     /* Requests without a MIME Type are errors from handlers that
        should just be handled by lwan_default_response(). */
     if (UNLIKELY(!request->response.mime_type)) {
@@ -136,8 +151,6 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
         /* Reset it after it has been called to avoid eternal recursion on errors */
         request->response.stream.callback = NULL;
 
-        log_request(request, status);
-
         if (callback_status >= HTTP_BAD_REQUEST) /* Status < 400: success */
             lwan_default_response(request, callback_status);
         return;
@@ -148,8 +161,6 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
         lwan_default_response(request, HTTP_INTERNAL_ERROR);
         return;
     }
-
-    log_request(request, status);
 
     if (request->flags & REQUEST_METHOD_HEAD) {
         lwan_write(request, headers, header_len);
@@ -226,32 +237,40 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
 {
     char *p_headers;
     char *p_headers_end = headers + headers_buf_size;
-    char buffer[32];
+    char buffer[3 * sizeof(unsigned int)];
     size_t len;
 
     p_headers = headers;
 
     if (request->flags & REQUEST_IS_HTTP_1_0)
-        APPEND_CONSTANT("HTTP/1.0");
+        APPEND_CONSTANT("HTTP/1.0 ");
     else
-        APPEND_CONSTANT("HTTP/1.1");
-    APPEND_CHAR(' ');
+        APPEND_CONSTANT("HTTP/1.1 ");
     APPEND_INT8(status);
     APPEND_CHAR(' ');
     APPEND_STRING(lwan_http_status_as_string(status));
-    APPEND_CONSTANT("\r\nContent-Length: ");
-    if (request->response.stream.callback)
-        APPEND_UINT(request->response.content_length);
-    else
-        APPEND_UINT(strbuf_get_length(request->response.buffer));
+
+    if (request->flags & RESPONSE_CHUNKED_ENCODING) {
+        APPEND_CONSTANT("\r\nTransfer-Encoding: chunked");
+    } else if (request->flags & RESPONSE_NO_CONTENT_LENGTH) {
+        /* Do nothing. */
+    } else {
+        APPEND_CONSTANT("\r\nContent-Length: ");
+        if (request->response.stream.callback)
+            APPEND_UINT(request->response.content_length);
+        else
+            APPEND_UINT(strbuf_get_length(request->response.buffer));
+    }
+
     APPEND_CONSTANT("\r\nContent-Type: ");
     APPEND_STRING(request->response.mime_type);
+
     if (request->conn->flags & CONN_KEEP_ALIVE)
         APPEND_CONSTANT("\r\nConnection: keep-alive");
     else
         APPEND_CONSTANT("\r\nConnection: close");
 
-    if (status < HTTP_BAD_REQUEST && request->response.headers) {
+    if ((status < HTTP_BAD_REQUEST && request->response.headers)) {
         lwan_key_value_t *header;
 
         for (header = request->response.headers; header->key; header++) {
@@ -262,7 +281,24 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
             APPEND_CHAR(' ');
             APPEND_STRING(header->value);
         }
+    } else if (status == HTTP_NOT_AUTHORIZED) {
+        lwan_key_value_t *header;
+
+        for (header = request->response.headers; header->key; header++) {
+            if (!strcmp(header->key, "WWW-Authenticate")) {
+                APPEND_CONSTANT("\r\nWWW-Authenticate: ");
+                APPEND_STRING(header->value);
+                break;
+            }
+        }
     }
+
+    APPEND_CONSTANT("\r\nDate: ");
+    APPEND_STRING_LEN(request->conn->thread->date.date, 29);
+
+    APPEND_CONSTANT("\r\nExpires: ");
+    APPEND_STRING_LEN(request->conn->thread->date.expires, 29);
+
     APPEND_CONSTANT("\r\nServer: lwan\r\n\r\n\0");
 
     return p_headers - headers - 1;
@@ -273,3 +309,130 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
 #undef APPEND_CONSTANT
 #undef APPEND_CHAR
 #undef APPEND_INT
+
+bool
+lwan_response_set_chunked(lwan_request_t *request, lwan_http_status_t status)
+{
+    char buffer[DEFAULT_BUFFER_SIZE];
+    size_t buffer_len;
+
+    if (request->flags & RESPONSE_SENT_HEADERS)
+        return false;
+
+    request->flags |= RESPONSE_CHUNKED_ENCODING;
+    buffer_len = lwan_prepare_response_header(request, status,
+                                                buffer, DEFAULT_BUFFER_SIZE);
+    if (UNLIKELY(!buffer_len))
+        return false;
+
+    request->flags |= RESPONSE_SENT_HEADERS;
+    lwan_send(request, buffer, buffer_len, MSG_MORE);
+
+    return true;
+}
+
+void
+lwan_response_send_chunk(lwan_request_t *request)
+{
+    if (!(request->flags & RESPONSE_SENT_HEADERS)) {
+        if (UNLIKELY(!lwan_response_set_chunked(request, HTTP_OK)))
+            return;
+    }
+
+    int buffer_len = strbuf_get_length(request->response.buffer);
+    if (UNLIKELY(!buffer_len)) {
+        static const char last_chunk[] = "0\r\n\r\n";
+        lwan_send(request, last_chunk, sizeof(last_chunk) - 1, 0);
+        return;
+    }
+
+    char chunk_size[3 * sizeof(int) + 2];
+    int chunk_size_len;
+
+    chunk_size_len = snprintf(chunk_size, sizeof(chunk_size), "%x\r\n", buffer_len);
+    if (UNLIKELY(chunk_size_len < 0))
+        return;
+
+    struct iovec chunk_vec[] = {
+        { .iov_base = chunk_size, .iov_len = chunk_size_len },
+        { .iov_base = strbuf_get_buffer(request->response.buffer), .iov_len = buffer_len },
+        { .iov_base = "\r\n", .iov_len = 2 }
+    };
+
+    lwan_writev(request, chunk_vec, N_ELEMENTS(chunk_vec));
+
+    if (UNLIKELY(strbuf_reset_length(request->response.buffer)))
+        coro_yield(request->conn->coro, CONN_CORO_MAY_RESUME);
+    else
+        coro_yield(request->conn->coro, CONN_CORO_ABORT);
+}
+
+bool
+lwan_response_set_event_stream(lwan_request_t *request,
+                               lwan_http_status_t status)
+{
+    char buffer[DEFAULT_BUFFER_SIZE];
+    size_t buffer_len;
+
+    if (request->flags & RESPONSE_SENT_HEADERS)
+        return false;
+
+    request->response.mime_type = "text/event-stream";
+    request->flags |= RESPONSE_NO_CONTENT_LENGTH;
+    buffer_len = lwan_prepare_response_header(request, status,
+                                                buffer, DEFAULT_BUFFER_SIZE);
+    if (UNLIKELY(!buffer_len))
+        return false;
+
+    request->flags |= RESPONSE_SENT_HEADERS;
+    lwan_send(request, buffer, buffer_len, MSG_MORE);
+
+    return true;
+}
+
+void
+lwan_response_send_event(lwan_request_t *request, const char *event)
+{
+    if (!(request->flags & RESPONSE_SENT_HEADERS)) {
+        if (UNLIKELY(!lwan_response_set_event_stream(request, HTTP_OK)))
+            return;
+    }
+
+    struct iovec vec[6];
+    size_t last = 0;
+
+    if (event) {
+        vec[last].iov_base = "event: ";
+        vec[last].iov_len = sizeof("event: ") - 1;
+        last++;
+
+        vec[last].iov_base = (char *)event;
+        vec[last].iov_len = strlen(event);
+        last++;
+
+        vec[last].iov_base = "\r\n";
+        vec[last].iov_len = 2;
+        last++;
+    }
+
+    int buffer_len = strbuf_get_length(request->response.buffer);
+    if (buffer_len) {
+        vec[last].iov_base = "data: ";
+        vec[last].iov_len = sizeof("data: ") - 1;
+        last++;
+
+        vec[last].iov_base = strbuf_get_buffer(request->response.buffer);
+        vec[last].iov_len = buffer_len;
+        last++;
+
+    }
+
+    vec[last].iov_base = "\r\n\r\n";
+    vec[last].iov_len = 4;
+    last++;
+
+    lwan_writev(request, vec, last);
+
+    strbuf_reset_length(request->response.buffer);
+    coro_yield(request->conn->coro, CONN_CORO_MAY_RESUME);
+}

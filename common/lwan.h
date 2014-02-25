@@ -94,6 +94,7 @@ typedef enum {
     HTTP_MOVED_PERMANENTLY = 301,
     HTTP_NOT_MODIFIED = 304,
     HTTP_BAD_REQUEST = 400,
+    HTTP_NOT_AUTHORIZED = 401,
     HTTP_NOT_FOUND = 404,
     HTTP_FORBIDDEN = 403,
     HTTP_NOT_ALLOWED = 405,
@@ -109,16 +110,20 @@ typedef enum {
     HANDLER_PARSE_RANGE = 1<<2,
     HANDLER_PARSE_ACCEPT_ENCODING = 1<<3,
     HANDLER_PARSE_POST_DATA = 1<<4,
+    HANDLER_MUST_AUTHORIZE = 1<<5,
 
     HANDLER_PARSE_MASK = 1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4
 } lwan_handler_flags_t;
 
 typedef enum {
-    REQUEST_ACCEPT_DEFLATE  = 1<<0,
-    REQUEST_IS_HTTP_1_0	    = 1<<1,
-    REQUEST_METHOD_GET      = 1<<2,
-    REQUEST_METHOD_HEAD     = 1<<3,
-    REQUEST_METHOD_POST     = 1<<4,
+    REQUEST_ACCEPT_DEFLATE     = 1<<0,
+    REQUEST_IS_HTTP_1_0        = 1<<1,
+    REQUEST_METHOD_GET         = 1<<2,
+    REQUEST_METHOD_HEAD        = 1<<3,
+    REQUEST_METHOD_POST        = 1<<4,
+    RESPONSE_SENT_HEADERS      = 1<<5,
+    RESPONSE_CHUNKED_ENCODING  = 1<<6,
+    RESPONSE_NO_CONTENT_LENGTH = 1<<7
 } lwan_request_flags_t;
 
 typedef enum {
@@ -169,10 +174,10 @@ struct lwan_connection_t_ {
 
 struct lwan_request_t_ {
     lwan_request_flags_t flags;
+    int fd;
     lwan_value_t url;
     lwan_value_t original_url;
     lwan_connection_t *conn;
-    int fd;
 
     struct {
         lwan_key_value_t *base;
@@ -206,17 +211,22 @@ struct lwan_url_map_t_ {
 
     lwan_handler_t *handler;
     void *args;
+
+    struct {
+        char *realm;
+        char *password_file;
+    } authorization;
 };
 
 struct lwan_thread_t_ {
     lwan_t *lwan;
     struct {
-        char date[31];
-        char expires[31];
+        char date[30];
+        char expires[30];
         time_t last;
     } date;
+    short id;
 
-    int id;
     pthread_t self;
     int epoll_fd;
 };
@@ -254,6 +264,12 @@ const char *lwan_request_get_query_param(lwan_request_t *request, const char *ke
 const char *lwan_request_get_remote_address(lwan_request_t *request, char *buffer);
 void lwan_process_request(lwan_t *l, lwan_request_t *request);
 
+bool lwan_response_set_chunked(lwan_request_t *request, lwan_http_status_t status);
+void lwan_response_send_chunk(lwan_request_t *request);
+
+bool lwan_response_set_event_stream(lwan_request_t *request, lwan_http_status_t status);
+void lwan_response_send_event(lwan_request_t *request, const char *event);
+
 void lwan_format_rfc_time(time_t t, char buffer[static 31]);
 
 const char *lwan_http_status_as_string(lwan_http_status_t status) __attribute__((pure));
@@ -263,6 +279,6 @@ const char *lwan_determine_mime_type_for_file_name(const char *file_name) __attr
 void lwan_init(lwan_t *l);
 void lwan_shutdown(lwan_t *l);
 
-int lwan_connection_get_fd(lwan_connection_t *conn);
+int lwan_connection_get_fd(lwan_connection_t *conn) __attribute__((pure));
 
 #endif /* __LWAN_H__ */
