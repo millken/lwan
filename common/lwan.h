@@ -127,6 +127,7 @@ typedef enum {
 } lwan_request_flags_t;
 
 typedef enum {
+    CONN_MASK               = -1,
     CONN_KEEP_ALIVE         = 1<<0,
     CONN_IS_ALIVE           = 1<<1,
     CONN_SHOULD_RESUME_CORO = 1<<2,
@@ -206,7 +207,7 @@ struct lwan_url_map_t_ {
     void *data;
 
     char *prefix;
-    int prefix_len;
+    size_t prefix_len;
     lwan_handler_flags_t flags;
 
     lwan_handler_t *handler;
@@ -233,9 +234,10 @@ struct lwan_thread_t_ {
 
 struct lwan_config_t_ {
     short port;
-    short keep_alive_timeout;
+    unsigned short keep_alive_timeout;
     bool quiet;
     bool reuse_port;
+    unsigned int expires;
 };
 
 struct lwan_t_ {
@@ -246,8 +248,8 @@ struct lwan_t_ {
     lwan_config_t config;
 
     struct {
-        int count;
-        int max_fd;
+        short count;
+        unsigned max_fd;
         lwan_thread_t *threads;
     } thread;
 };

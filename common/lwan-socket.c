@@ -92,12 +92,14 @@ lwan_socket_init(lwan_t *l)
 
     SET_SOCKET_OPTION_MAY_FAIL(SOL_TCP, TCP_FASTOPEN,
                                             (int[]){ 5 }, sizeof(int));
+    SET_SOCKET_OPTION_MAY_FAIL(SOL_TCP, TCP_QUICKACK,
+                                            (int[]){ 0 }, sizeof(int));
     if (l->config.reuse_port)
         SET_SOCKET_OPTION_MAY_FAIL(SOL_SOCKET, SO_REUSEPORT,
                                                 (int[]){ 1 }, sizeof(int));
 
     memset(&sin, 0, sizeof(sin));
-    sin.sin_port = htons(l->config.port);
+    sin.sin_port = htons((uint16_t)l->config.port);
     sin.sin_addr.s_addr = INADDR_ANY;
     sin.sin_family = AF_INET;
 

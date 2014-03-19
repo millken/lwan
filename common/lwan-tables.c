@@ -17,10 +17,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
+#define _GNU_SOURCE
+#include <assert.h>
 #include <string.h>
+#include <stdlib.h>
+#include <zlib.h>
 
 #include "lwan.h"
-#include "hash.h"
 #include "mime-types.h"
 
 enum {
@@ -32,30 +35,52 @@ enum {
     EXT_JS  = MULTICHAR_CONSTANT_L('.','j','s',0),
 } lwan_mime_ext_t;
 
-static struct hash *mime_types;
+static unsigned char uncompressed_mime_entries[MIME_UNCOMPRESSED_LEN];
+static struct mime_entry mime_entries[MIME_ENTRIES];
+static bool mime_entries_initialized = false;
 
 void
 lwan_tables_init(void)
 {
-    lwan_status_debug("Initializing tables");
-    if (mime_types)
+    if (mime_entries_initialized)
         return;
 
-    mime_types = hash_str_new(NULL, NULL);
-    if (!mime_types)
-        return;
+    lwan_status_debug("Uncompressing MIME type table");
+    uLongf uncompressed_length = MIME_UNCOMPRESSED_LEN;
+    int ret = uncompress((Bytef*)uncompressed_mime_entries,
+            &uncompressed_length, (const Bytef*)mime_entries_compressed,
+            MIME_COMPRESSED_LEN);
+    if (ret != Z_OK)
+        lwan_status_critical(
+            "Error while uncompressing table: zlib error %d", ret);
 
-    size_t i = 0;
-    for (i = 0; i < N_ELEMENTS(mime_type_array); i++)
-        hash_add(mime_types, mime_type_array[i].extension,
-                    mime_type_array[i].mime_type);
+    if (uncompressed_length != MIME_UNCOMPRESSED_LEN)
+        lwan_status_critical("Expected uncompressed length %d, got %ld",
+            MIME_UNCOMPRESSED_LEN, uncompressed_length);
+
+    size_t i;
+    unsigned char *ptr = uncompressed_mime_entries;
+    for (i = 0; i < MIME_ENTRIES; i++) {
+        mime_entries[i].extension = (char*)ptr;
+        ptr = rawmemchr(ptr + 1, '\0') + 1;
+        mime_entries[i].type = (char*)ptr;
+        ptr = rawmemchr(ptr + 1, '\0') + 1;
+    }
+
+    mime_entries_initialized = true;
 }
 
 void
 lwan_tables_shutdown(void)
 {
-    lwan_status_debug("Shutting down tables");
-    hash_free(mime_types);
+}
+
+static int
+_compare_mime_entry(const void *a, const void *b)
+{
+    const struct mime_entry *me1 = a;
+    const struct mime_entry *me2 = b;
+    return strcmp(me1->extension, me2->extension);
 }
 
 const char *
@@ -75,9 +100,12 @@ lwan_determine_mime_type_for_file_name(const char *file_name)
     }
 
     if (LIKELY(*last_dot)) {
-        const char *mime_type = hash_find(mime_types, last_dot + 1);
-        if (LIKELY(mime_type))
-            return mime_type;
+        struct mime_entry *entry, key = { .extension = last_dot + 1 };
+
+        entry = bsearch(&key, mime_entries, MIME_ENTRIES,
+                       sizeof(struct mime_entry), _compare_mime_entry);
+        if (LIKELY(entry))
+            return entry->type;
     }
 
 fallback:

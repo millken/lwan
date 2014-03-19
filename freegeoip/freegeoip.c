@@ -229,11 +229,11 @@ destroy_ipinfo(struct cache_entry_t *entry,
 }
 
 static ALWAYS_INLINE char *
-text_column_helper(sqlite3_stmt *stmt, int index)
+text_column_helper(sqlite3_stmt *stmt, int ind)
 {
     const unsigned char *value;
 
-    value = sqlite3_column_text(stmt, index);
+    value = sqlite3_column_text(stmt, ind);
     return value ? strdup((char *)value) : NULL;
 }
 
@@ -382,15 +382,11 @@ templated_output(lwan_request_t *request,
         response->mime_type = "text/plain; charset=UTF-8";
 
     const char *callback = lwan_request_get_query_param(request, "callback");
-    if (!callback) {
-        lwan_tpl_apply_with_buffer(tpl, response->buffer, info);
-    } else {
-        struct ip_info_t info_with_callback = *info;
-        info_with_callback.callback = callback;
+    struct ip_info_t info_with_callback = *info;
+    info_with_callback.callback = callback;
 
-        lwan_tpl_apply_with_buffer(tpl, response->buffer,
-                    &info_with_callback);
-    }
+    lwan_tpl_apply_with_buffer(tpl, response->buffer,
+                &info_with_callback);
 
     return HTTP_OK;
 }
@@ -421,7 +417,7 @@ main(void)
                                  SQLITE_OPEN_READONLY, NULL);
     if (result != SQLITE_OK)
         lwan_status_critical("Could not open database: %s",
-                    sqlite3_errstr(result));
+                    sqlite3_errmsg(db));
     cache = cache_create(create_ipinfo, destroy_ipinfo, NULL, 10);
 
 #if QUERIES_PER_HOUR != 0

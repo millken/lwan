@@ -38,11 +38,19 @@
 
 static jmp_buf cleanup_jmp_buf;
 
+#define ONE_MINUTE 60
+#define ONE_HOUR (ONE_MINUTE * 60)
+#define ONE_DAY (ONE_HOUR * 24)
+#define ONE_WEEK (ONE_DAY * 7)
+#define ONE_MONTH (ONE_DAY * 31)
+#define ONE_YEAR (ONE_MONTH * 12)
+
 static const lwan_config_t default_config = {
     .port = 8080,
     .keep_alive_timeout = 15,
     .quiet = false,
-    .reuse_port = false
+    .reuse_port = false,
+    .expires = 1 * ONE_WEEK
 };
 
 static void *find_symbol(const char *name)
@@ -142,7 +150,6 @@ static void parse_listener_prefix(config_t *c, config_line_t *l, lwan_t *lwan)
     lwan_handler_t *handler = NULL;
     void *callback = NULL;
     char *prefix = strdupa(l->line.value);
-    void *data = NULL;
 
     while (config_read_line(c, l)) {
       switch (l->type) {
@@ -194,7 +201,7 @@ add_map:
     if (callback) {
         url_map.callback = callback;
         url_map.flags |= HANDLER_PARSE_MASK;
-        url_map.data = data;
+        url_map.data = NULL;
         url_map.handler = NULL;
     } else if (handler && handler->init_from_hash && handler->handle) {
         url_map.data = handler->init_from_hash(hash);
@@ -235,7 +242,7 @@ void lwan_set_url_map(lwan_t *l, const lwan_url_map_t *map)
 
 static void parse_listener(config_t *c, config_line_t *l, lwan_t *lwan)
 {
-    lwan->config.port = parse_int(l->section.param, 8080);
+    lwan->config.port = (short)parse_long(l->section.param, 8080);
 
     while (config_read_line(c, l)) {
         switch (l->type) {
@@ -279,6 +286,32 @@ out:
     return "lwan.conf";
 }
 
+static unsigned int _parse_expires(const char *str, unsigned int default_value)
+{
+    unsigned int total = 0;
+    unsigned int period;
+    char multiplier;
+
+    while (*str && sscanf(str, "%d%c", &period, &multiplier) == 2) {
+        switch (multiplier) {
+        case 's': total += period; break;
+        case 'm': total += period * ONE_MINUTE; break;
+        case 'h': total += period * ONE_HOUR; break;
+        case 'd': total += period * ONE_DAY; break;
+        case 'w': total += period * ONE_WEEK; break;
+        case 'M': total += period * ONE_MONTH; break;
+        case 'y': total += period * ONE_YEAR; break;
+        default:
+            lwan_status_warning("Ignoring unknown multiplier: %c",
+                        multiplier);
+        }
+
+        str = rawmemchr(str, multiplier) + 1;
+    }
+
+    return total ? total : default_value;
+}
+
 static bool setup_from_config(lwan_t *lwan)
 {
     config_t conf;
@@ -299,7 +332,7 @@ static bool setup_from_config(lwan_t *lwan)
         switch (line.type) {
         case CONFIG_LINE_TYPE_LINE:
             if (!strcmp(line.line.key, "keep_alive_timeout"))
-                lwan->config.keep_alive_timeout = parse_int(line.line.value,
+                lwan->config.keep_alive_timeout = (unsigned short)parse_long(line.line.value,
                             default_config.keep_alive_timeout);
             else if (!strcmp(line.line.key, "quiet"))
                 lwan->config.quiet = parse_bool(line.line.value,
@@ -307,6 +340,9 @@ static bool setup_from_config(lwan_t *lwan)
             else if (!strcmp(line.line.key, "reuse_port"))
                 lwan->config.reuse_port = parse_bool(line.line.value,
                             default_config.reuse_port);
+            else if (!strcmp(line.line.key, "expires"))
+                lwan->config.expires = _parse_expires(line.line.value,
+                            default_config.expires);
             else
                 config_error(&conf, "Unknown config key: %s", line.line.key);
             break;
@@ -339,7 +375,7 @@ static bool setup_from_config(lwan_t *lwan)
 void
 lwan_init(lwan_t *l)
 {
-    int max_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    long max_threads = sysconf(_SC_NPROCESSORS_ONLN);
     struct rlimit r;
 
     /* Load defaults */
@@ -363,7 +399,7 @@ lwan_init(lwan_t *l)
     /* Continue initialization as normal. */
     lwan_status_debug("Initializing lwan web server");
 
-    l->thread.count = max_threads > 0 ? max_threads : 2;
+    l->thread.count = (short)(max_threads > 0 ? max_threads : 2);
 
     if (getrlimit(RLIMIT_NOFILE, &r) < 0)
         lwan_status_critical_perror("getrlimit");
@@ -376,14 +412,14 @@ lwan_init(lwan_t *l)
         lwan_status_critical_perror("setrlimit");
 
     l->conns = calloc(r.rlim_cur, sizeof(lwan_connection_t));
-    l->thread.max_fd = r.rlim_cur / l->thread.count;
+    l->thread.max_fd = (unsigned)r.rlim_cur / (unsigned)l->thread.count;
     lwan_status_info("Using %d threads, maximum %d sockets per thread",
         l->thread.count, l->thread.max_fd);
 
     for (--r.rlim_cur; r.rlim_cur; --r.rlim_cur)
         l->conns[r.rlim_cur].response_buffer = strbuf_new();
 
-    srand(time(NULL));
+    srand((unsigned)time(NULL));
     signal(SIGPIPE, SIG_IGN);
     close(STDIN_FILENO);
 
@@ -404,8 +440,8 @@ lwan_shutdown(lwan_t *l)
     lwan_status_debug("Shutting down URL handlers");
     lwan_trie_destroy(l->url_map_trie);
 
-    int i;
-    for (i = l->thread.max_fd * l->thread.count - 1; i >= 0; --i)
+    unsigned i;
+    for (i = l->thread.max_fd * (unsigned)l->thread.count - 1; i != 0; --i)
         strbuf_free(l->conns[i].response_buffer);
 
     free(l->conns);
@@ -419,7 +455,7 @@ lwan_shutdown(lwan_t *l)
 static ALWAYS_INLINE void
 _push_request_fd(lwan_t *l, int fd)
 {
-    unsigned thread;
+    int thread;
 #ifdef __x86_64__
     assert(sizeof(lwan_connection_t) == 32);
     /* Since lwan_connection_t is guaranteed to be 32-byte long, two of them

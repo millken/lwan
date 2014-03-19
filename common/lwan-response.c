@@ -33,18 +33,18 @@ static lwan_tpl_t *error_template = NULL;
 static const char *error_template_str = "<html><head><style>" \
     "body{" \
     "background:#627d4d;" \
-    "background:-moz-radial-gradient(center,ellipse cover,#627d4d 15\%,#1f3b08 100\%);" \
-    "background:-webkit-gradient(radial,center center,0px,center center,100\%,color-stop(15\%,#627d4d),color-stop(100\%,#1f3b08));" \
-    "background:-webkit-radial-gradient(center,ellipse cover,#627d4d 15\%,#1f3b08 100\%);" \
-    "background:-o-radial-gradient(center,ellipse cover,#627d4d 15\%,#1f3b08 100\%);" \
-    "background:-ms-radial-gradient(center,ellipse cover,#627d4d 15\%,#1f3b08 100\%);" \
-    "background:radial-gradient(center,ellipse cover,#627d4d 15\%,#1f3b08 100\%);" \
-    "height:100\%;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;text-align:center;border:0;letter-spacing:-1px;margin:0;padding:0}.sorry{color:#244837;font-size:18px;line-height:24px;text-shadow:0" \
+    "background:-moz-radial-gradient(center,ellipse cover,#627d4d 15\x25,#1f3b08 100\x25);" \
+    "background:-webkit-gradient(radial,center center,0px,center center,100\x25,color-stop(15\x25,#627d4d),color-stop(100\x25,#1f3b08));" \
+    "background:-webkit-radial-gradient(center,ellipse cover,#627d4d 15\x25,#1f3b08 100\x25);" \
+    "background:-o-radial-gradient(center,ellipse cover,#627d4d 15\x25,#1f3b08 100\x25);" \
+    "background:-ms-radial-gradient(center,ellipse cover,#627d4d 15\x25,#1f3b08 100\x25);" \
+    "background:radial-gradient(center,ellipse cover,#627d4d 15\x25,#1f3b08 100\x25);" \
+    "height:100\x25;font-family:Arial,'Helvetica Neue',Helvetica,sans-serif;text-align:center;border:0;letter-spacing:-1px;margin:0;padding:0}.sorry{color:#244837;font-size:18px;line-height:24px;text-shadow:0" \
     "1px 1px rgba(255,255,255,0.33)}h1{color:#fff;font-size:30px;font-weight:700;text-shadow:0 1px 4px rgba(0,0,0,0.68);letter-spacing:-1px;margin:0}" \
     "</style>" \
     "</head>" \
     "<body>" \
-    "<table height=\"100\%\" width=\"100\%\"><tr><td align=\"center\" valign=\"middle\">" \
+    "<table height=\"100\x25\" width=\"100\x25\"><tr><td align=\"center\" valign=\"middle\">" \
     "<div>" \
     "<h1>{{short_message}}</h1>" \
     "<div class=\"sorry\">" \
@@ -121,8 +121,6 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
 {
     char headers[DEFAULT_HEADERS_SIZE];
 
-    log_request(request, status);
-
     if (request->flags & RESPONSE_CHUNKED_ENCODING) {
         /* Send last, 0-sized chunk */
         if (UNLIKELY(!strbuf_reset_length(request->response.buffer)))
@@ -141,6 +139,8 @@ lwan_response(lwan_request_t *request, lwan_http_status_t status)
     if (UNLIKELY(!request->response.mime_type)) {
         lwan_default_response(request, status);
         return;
+    } else {
+        log_request(request, status);
     }
 
     if (request->response.stream.callback) {
@@ -217,9 +217,9 @@ lwan_default_response(lwan_request_t *request, lwan_http_status_t status)
 #define APPEND_INT8(value_) \
     do { \
         RETURN_0_ON_OVERFLOW(3); \
-        APPEND_CHAR_NOCHECK(((value_) / 100) % 10 + '0'); \
-        APPEND_CHAR_NOCHECK(((value_) / 10) % 10 + '0'); \
-        APPEND_CHAR_NOCHECK((value_) % 10 + '0'); \
+        APPEND_CHAR_NOCHECK((char)(((value_) / 100) % 10 + '0')); \
+        APPEND_CHAR_NOCHECK((char)(((value_) / 10) % 10 + '0')); \
+        APPEND_CHAR_NOCHECK((char)((value_) % 10 + '0')); \
     } while(0)
 
 #define APPEND_UINT(value_) \
@@ -237,7 +237,7 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
 {
     char *p_headers;
     char *p_headers_end = headers + headers_buf_size;
-    char buffer[3 * sizeof(unsigned int)];
+    char buffer[INT_TO_STR_BUFFER_SIZE];
     size_t len;
 
     p_headers = headers;
@@ -301,7 +301,7 @@ lwan_prepare_response_header(lwan_request_t *request, lwan_http_status_t status,
 
     APPEND_CONSTANT("\r\nServer: lwan\r\n\r\n\0");
 
-    return p_headers - headers - 1;
+    return (size_t)(p_headers - headers - 1);
 }
 
 #undef APPEND_STRING_LEN
@@ -339,19 +339,18 @@ lwan_response_send_chunk(lwan_request_t *request)
             return;
     }
 
-    int buffer_len = strbuf_get_length(request->response.buffer);
+    size_t buffer_len = strbuf_get_length(request->response.buffer);
     if (UNLIKELY(!buffer_len)) {
         static const char last_chunk[] = "0\r\n\r\n";
         lwan_send(request, last_chunk, sizeof(last_chunk) - 1, 0);
         return;
     }
 
-    char chunk_size[3 * sizeof(int) + 2];
-    int chunk_size_len;
-
-    chunk_size_len = snprintf(chunk_size, sizeof(chunk_size), "%x\r\n", buffer_len);
-    if (UNLIKELY(chunk_size_len < 0))
+    char chunk_size[3 * sizeof(size_t) + 2];
+    int converted_len = snprintf(chunk_size, sizeof(chunk_size), "%lx\r\n", buffer_len);
+    if (UNLIKELY(converted_len < 0))
         return;
+    size_t chunk_size_len = (size_t)converted_len;
 
     struct iovec chunk_vec[] = {
         { .iov_base = chunk_size, .iov_len = chunk_size_len },
@@ -399,7 +398,7 @@ lwan_response_send_event(lwan_request_t *request, const char *event)
     }
 
     struct iovec vec[6];
-    size_t last = 0;
+    int last = 0;
 
     if (event) {
         vec[last].iov_base = "event: ";
@@ -415,7 +414,7 @@ lwan_response_send_event(lwan_request_t *request, const char *event)
         last++;
     }
 
-    int buffer_len = strbuf_get_length(request->response.buffer);
+    size_t buffer_len = strbuf_get_length(request->response.buffer);
     if (buffer_len) {
         vec[last].iov_base = "data: ";
         vec[last].iov_len = sizeof("data: ") - 1;

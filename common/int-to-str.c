@@ -21,32 +21,36 @@
 #include "int-to-str.h"
 
 ALWAYS_INLINE char *
-uint_to_string(uint32_t value, char buf16[static 16], size_t *len)
+uint_to_string(size_t value,
+               char buffer[INT_TO_STR_BUFFER_SIZE],
+               size_t *len)
 {
-    char *p = buf16 + 15;
+    char *p = buffer + INT_TO_STR_BUFFER_SIZE;
 
     assert(len);
 
     *p = '\0';
     do {
-        *--p = '0' + (value % 10);
+        *--p = (char)('0' + value % 10);
     } while (value /= 10);
 
-    *len = 15 - (p - buf16);
+    *len = (size_t)(INT_TO_STR_BUFFER_SIZE - (size_t)(p - buffer));
 
     return p;
 }
 
 ALWAYS_INLINE char *
-int_to_string(int32_t value, char buf16[static 16], size_t *len)
+int_to_string(ssize_t value,
+              char buffer[INT_TO_STR_BUFFER_SIZE],
+              size_t *len)
 {
     if (value < 0) {
-        char *p = uint_to_string((uint32_t) -value, buf16, len);
+        char *p = uint_to_string((size_t) -value, buffer, len);
         *--p = '-';
         ++*len;
 
         return p;
     }
 
-    return uint_to_string((uint32_t) value, buf16, len);
+    return uint_to_string((size_t) value, buffer, len);
 }
